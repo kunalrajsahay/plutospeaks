@@ -1,517 +1,451 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { supabase } from "@/lib/supabase";
+import { supabase } from "@/lib/supabaseClient";
 
-type Mode = "ai" | "friend";
+type Msg = {
+  id?: string;
+  sender_id?: string | null;
+  receiver_id?: string | null;
+  sender_email?: string | null;
+  receiver_email?: string | null;
+  content: string;
+  created_at?: string;
+};
 
 export default function Home() {
-  const [mode, setMode] = useState<Mode>("ai");
   const [user, setUser] = useState<any>(null);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
 
-  const [authEmail, setAuthEmail] = useState("");
-  const [authPassword, setAuthPassword] = useState("");
-  const [newPassword, setNewPassword] = useState("");
-  const [isResetMode, setIsResetMode] = useState(false);
-
+  const [mode, setMode] = useState<"ai" | "friend">("ai");
   const [friendEmail, setFriendEmail] = useState("");
-  const [input, setInput] = useState("");
-  const [messages, setMessages] = useState<any[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [activeFriend, setActiveFriend] = useState("");
 
+  const [aiInput, setAiInput] = useState("");
+  const [friendInput, setFriendInput] = useState("");
+  const [aiMessages, setAiMessages] = useState<Msg[]>([]);
+  const [friendMessages, setFriendMessages] = useState<Msg[]>([]);
+
+  const [loading, setLoading] = useState(false);
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
-  useEffect(() => {
-    supabase.auth.getUser().then(({ data }) => setUser(data.user));
+  const scrollBottom = () => {
+    setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
+  };
 
-    const { data } = supabase.auth.onAuthStateChange((event, session) => {
+  useEffect(() => {
+    const init = async () => {
+      const { data } = await supabase.auth.getSession();
+      setUser(data.session?.user || null);
+
+      const savedFriend = localStorage.getItem("plutospeaks_friend_email");
+      if (savedFriend) {
+        setFriendEmail(savedFriend);
+        setActiveFriend(savedFriend);
+      }
+    };
+
+    init();
+
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
       setUser(session?.user || null);
-      if (event === "PASSWORD_RECOVERY") setIsResetMode(true);
     });
 
-    return () => data.subscription.unsubscribe();
+    return () => listener.subscription.unsubscribe();
   }, []);
 
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  const login = async () => {
+    if (!email || !password) return alert("Enter email and password");
 
-  async function signUp() {
-    if (!authEmail.trim() || !authPassword.trim()) {
-      alert("Enter email and password");
-      return;
-    }
-
-    const { data, error } = await supabase.auth.signUp({
-      email: authEmail,
-      password: authPassword,
+    const { error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
     });
 
-    if (error) return alert(error.message);
+    if (error) alert(error.message);
+  };
 
-    if (data.user) {
-      await supabase.from("profiles").upsert({
-        id: data.user.id,
-        email: data.user.email,
-      });
-    }
+  const signUp = async () => {
+    if (!email || !password) return alert("Enter email and password");
 
-    alert("Signup successful ✅ Now login");
-  }
-
-  async function login() {
-    if (!authEmail.trim() || !authPassword.trim()) {
-      alert("Enter email and password");
-      return;
-    }
-
-    const { data, error } = await supabase.auth.signInWithPassword({
-      email: authEmail,
-      password: authPassword,
+    const { error } = await supabase.auth.signUp({
+      email,
+      password,
     });
 
-    if (error) return alert(error.message);
+    if (error) alert(error.message);
+    else alert("Account created. Now login with email and password.");
+  };
 
-    if (data.user) {
-      await supabase.from("profiles").upsert({
-        id: data.user.id,
-        email: data.user.email,
-      });
+  const forgotPassword = async () => {
+    if (!email) return alert("Enter email first");
 
-      setUser(data.user);
-    }
-  }
-
-  async function resetPasswordEmail() {
-    if (!authEmail.trim()) {
-      alert("Enter your email first");
-      return;
-    }
-
-    const { error } = await supabase.auth.resetPasswordForEmail(authEmail, {
-      redirectTo: "http://localhost:3000",
+    const { error } = await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo: window.location.origin,
     });
 
-    if (error) return alert(error.message);
+    if (error) alert(error.message);
+    else alert("Password reset email sent.");
+  };
 
-    alert("Password reset email sent 📩");
-  }
-
-  async function updatePassword() {
-    if (!newPassword.trim()) {
-      alert("Enter new password");
-      return;
-    }
-
-    const { error } = await supabase.auth.updateUser({
-      password: newPassword,
-    });
-
-    if (error) return alert(error.message);
-
-    setIsResetMode(false);
-    setNewPassword("");
+  const logout = async () => {
     await supabase.auth.signOut();
     setUser(null);
-    alert("Password updated ✅ Now login again");
-  }
+    setFriendMessages([]);
+    setActiveFriend("");
+  };
 
-  async function logout() {
-    await supabase.auth.signOut();
-    setUser(null);
-    setMessages([]);
-  }
+  const openFriendChat = async () => {
+    const cleanEmail = friendEmail.trim().toLowerCase();
 
-  async function loadFriendMessages() {
-    if (!user || !friendEmail.trim()) return;
+    if (!cleanEmail) {
+      alert("Enter friend email first");
+      return;
+    }
 
-    const friend = friendEmail.trim();
+    localStorage.setItem("plutospeaks_friend_email", cleanEmail);
+    setActiveFriend(cleanEmail);
+    setMode("friend");
+
+    await loadFriendMessages(cleanEmail);
+  };
+
+  const loadFriendMessages = async (friend = activeFriend) => {
+    if (!user?.email || !friend) return;
+
+    const myEmail = user.email.toLowerCase();
+    const otherEmail = friend.toLowerCase();
 
     const { data, error } = await supabase
       .from("messages")
       .select("*")
       .or(
-        `and(sender_email.eq.${user.email},receiver_email.eq.${friend}),and(sender_email.eq.${friend},receiver_email.eq.${user.email})`
+        `and(sender_email.eq.${myEmail},receiver_email.eq.${otherEmail}),and(sender_email.eq.${otherEmail},receiver_email.eq.${myEmail})`
       )
       .order("created_at", { ascending: true });
 
-    if (!error && data) setMessages(data);
-  }
+    if (error) {
+      console.error("Load messages error:", error);
+      return;
+    }
+
+    setFriendMessages(data || []);
+    scrollBottom();
+  };
 
   useEffect(() => {
-    if (mode !== "friend" || !user || !friendEmail.trim()) return;
+    if (!user || !activeFriend) return;
 
-    loadFriendMessages();
-
-    const friend = friendEmail.trim();
+    loadFriendMessages(activeFriend);
 
     const channel = supabase
-      .channel("private-chat")
+      .channel("plutospeaks-realtime-chat")
       .on(
         "postgres_changes",
-        { event: "INSERT", schema: "public", table: "messages" },
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "messages",
+        },
         (payload) => {
-          const msg: any = payload.new;
+          const msg = payload.new as Msg;
+          const myEmail = user.email?.toLowerCase();
+          const otherEmail = activeFriend.toLowerCase();
 
-          const isThisChat =
-            (msg.sender_email === user.email && msg.receiver_email === friend) ||
-            (msg.sender_email === friend && msg.receiver_email === user.email);
+          const belongsToChat =
+            (msg.sender_email === myEmail && msg.receiver_email === otherEmail) ||
+            (msg.sender_email === otherEmail && msg.receiver_email === myEmail);
 
-          if (isThisChat) {
-            setMessages((prev) => {
-              const exists = prev.some((m) => m.id === msg.id);
-              return exists ? prev : [...prev, msg];
+          if (belongsToChat) {
+            setFriendMessages((prev) => {
+              if (msg.id && prev.some((m) => m.id === msg.id)) return prev;
+              return [...prev, msg];
             });
+            scrollBottom();
           }
         }
       )
       .subscribe();
 
+    const fallback = setInterval(() => {
+      loadFriendMessages(activeFriend);
+    }, 5000);
+
     return () => {
       supabase.removeChannel(channel);
+      clearInterval(fallback);
     };
-  }, [mode, user, friendEmail]);
+  }, [user, activeFriend]);
 
-  async function sendMessage() {
-    if (!input.trim() || loading) return;
+  const sendFriendMessage = async () => {
+    if (!user?.email) return alert("Please login first");
+    if (!activeFriend) return alert("Enter friend email first");
+    if (!friendInput.trim()) return;
 
-    const text = input.trim();
-    setInput("");
+    const content = friendInput.trim();
+    setFriendInput("");
 
-    if (mode === "friend") {
-      if (!user) return alert("Login first");
-      if (!friendEmail.trim()) return alert("Enter friend email");
+    const tempMsg: Msg = {
+      sender_id: user.id,
+      sender_email: user.email.toLowerCase(),
+      receiver_email: activeFriend.toLowerCase(),
+      content,
+      created_at: new Date().toISOString(),
+    };
 
-      const tempMessage = {
-        id: crypto.randomUUID(),
-        sender_id: user.id,
-        sender_email: user.email,
-        receiver_email: friendEmail.trim(),
-        content: text,
-        created_at: new Date().toISOString(),
-        pending: true,
-      };
+    setFriendMessages((prev) => [...prev, tempMsg]);
+    scrollBottom();
 
-      setMessages((prev) => [...prev, tempMessage]);
+    const { error } = await supabase.from("messages").insert({
+      sender_id: user.id,
+      sender_email: user.email.toLowerCase(),
+      receiver_email: activeFriend.toLowerCase(),
+      content,
+    });
 
-      const { data, error } = await supabase
-        .from("messages")
-        .insert({
-          sender_id: user.id,
-          sender_email: user.email,
-          receiver_email: friendEmail.trim(),
-          content: text,
-        })
-        .select()
-        .single();
-
-      if (error) {
-        alert(error.message);
-        return;
-      }
-
-      if (data) {
-        setMessages((prev) =>
-          prev.map((m) => (m.id === tempMessage.id ? data : m))
-        );
-      }
-
-      return;
+    if (error) {
+      console.error("Send error:", error);
+      alert(error.message);
+      await loadFriendMessages(activeFriend);
     }
+  };
 
-    setMessages((prev) => [
-      ...prev,
-      {
-        role: "user",
-        content: text,
-        created_at: new Date().toISOString(),
-      },
-    ]);
+  const sendAIMessage = async () => {
+    if (!aiInput.trim()) return;
 
+    const userMsg: Msg = {
+      content: aiInput.trim(),
+      sender_email: "you",
+      created_at: new Date().toISOString(),
+    };
+
+    setAiMessages((prev) => [...prev, userMsg]);
+    const question = aiInput.trim();
+    setAiInput("");
     setLoading(true);
+    scrollBottom();
 
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text }),
+        body: JSON.stringify({ message: question }),
       });
 
       const data = await res.json();
 
-      setMessages((prev) => [
+      setAiMessages((prev) => [
         ...prev,
         {
-          role: "bot",
-          content: data.reply || "Pluto could not respond.",
+          content: data.reply || "⚠️ Pluto is thinking too hard right now...",
+          sender_email: "PlutoSpeaks AI",
           created_at: new Date().toISOString(),
         },
       ]);
     } catch {
-      setMessages((prev) => [
+      setAiMessages((prev) => [
         ...prev,
         {
-          role: "bot",
-          content: "⚠️ Pluto is having trouble connecting to AI.",
+          content: "⚠️ Pluto is thinking too hard right now...",
+          sender_email: "PlutoSpeaks AI",
           created_at: new Date().toISOString(),
         },
       ]);
     }
 
     setLoading(false);
-  }
+    scrollBottom();
+  };
 
-  function formatTime(dateValue: string) {
-    return new Date(dateValue).toLocaleTimeString([], {
+  const timeText = (date?: string) => {
+    if (!date) return "";
+    return new Date(date).toLocaleTimeString([], {
       hour: "2-digit",
       minute: "2-digit",
     });
-  }
+  };
+
+  const activeMessages = mode === "ai" ? aiMessages : friendMessages;
 
   return (
-    <main className="relative flex h-screen bg-gradient-to-br from-black via-purple-900 to-blue-900 text-white overflow-hidden">
-      <style jsx>{`
-        @keyframes fadeGlow {
-          0% { opacity: 0.35; text-shadow: 0 0 4px #22d3ee; }
-          50% { opacity: 1; text-shadow: 0 0 16px #22d3ee, 0 0 28px #a855f7; }
-          100% { opacity: 0.35; text-shadow: 0 0 4px #22d3ee; }
-        }
-        .kunal-watermark {
-          animation: fadeGlow 3s ease-in-out infinite;
-        }
-      `}</style>
-
-      <section className="w-1/4 min-w-[270px] p-6 border-r border-white/10 flex flex-col items-center bg-black/20">
-        <img
-          src="/pluto.png"
-          alt="PlutoSpeaks"
-          className="w-32 h-32 object-cover rounded-xl shadow-[0_0_30px_#22d3ee]"
-        />
-
-        <h1 className="mt-5 text-3xl font-bold text-yellow-300">
-          PlutoSpeaks
-        </h1>
-
-        <p className="text-sm text-gray-300 mt-3 text-center">
-          Exploring the Universe of Knowledge
-        </p>
-
-        {isResetMode ? (
-          <div className="mt-8 w-full space-y-3">
-            <p className="text-sm text-cyan-300 text-center">
-              Create your new password
-            </p>
-
-            <input
-              className="w-full p-3 rounded-lg bg-black/40 border border-white/20 outline-none text-white placeholder:text-gray-400"
-              placeholder="New password"
-              type="password"
-              value={newPassword}
-              onChange={(e) => setNewPassword(e.target.value)}
-            />
-
-            <button
-              onClick={updatePassword}
-              className="w-full bg-cyan-500 hover:bg-cyan-400 py-3 rounded-lg font-semibold"
-            >
-              Update Password
-            </button>
-          </div>
-        ) : !user ? (
-          <div className="mt-8 w-full space-y-3">
-            <input
-              className="w-full p-3 rounded-lg bg-black/40 border border-white/20 outline-none text-white placeholder:text-gray-400"
-              placeholder="Email"
-              value={authEmail}
-              onChange={(e) => setAuthEmail(e.target.value)}
-            />
-
-            <input
-              className="w-full p-3 rounded-lg bg-black/40 border border-white/20 outline-none text-white placeholder:text-gray-400"
-              placeholder="Password"
-              type="password"
-              value={authPassword}
-              onChange={(e) => setAuthPassword(e.target.value)}
-            />
-
-            <button
-              onClick={login}
-              className="w-full bg-cyan-500 hover:bg-cyan-400 py-3 rounded-lg font-semibold"
-            >
-              Login
-            </button>
-
-            <button
-              onClick={signUp}
-              className="w-full bg-purple-600 hover:bg-purple-500 py-3 rounded-lg font-semibold"
-            >
-              Sign Up
-            </button>
-
-            <button
-              onClick={resetPasswordEmail}
-              className="w-full text-cyan-300 hover:text-cyan-200 text-sm font-semibold"
-            >
-              Forgot password?
-            </button>
-          </div>
-        ) : (
-          <div className="mt-8 w-full space-y-3">
-            <div className="text-sm text-cyan-300 break-all">
-              Logged in: {user.email}
-            </div>
-
-            <button
-              onClick={logout}
-              className="w-full bg-red-500/70 hover:bg-red-500 py-3 rounded-lg font-semibold"
-            >
-              Logout
-            </button>
-
-            {mode === "friend" && (
-              <>
-                <input
-                  className="w-full p-3 rounded-lg bg-black/40 border border-white/20 outline-none text-white placeholder:text-gray-400"
-                  placeholder="Friend email"
-                  value={friendEmail}
-                  onChange={(e) => setFriendEmail(e.target.value)}
-                />
-
-                <button
-                  onClick={loadFriendMessages}
-                  className="w-full bg-purple-600 hover:bg-purple-500 py-3 rounded-lg font-semibold"
-                >
-                  Open Friend Chat
-                </button>
-              </>
-            )}
-          </div>
-        )}
-      </section>
-
-      <section className="flex-1 flex flex-col p-6">
-        <div className="flex justify-between items-center mb-6">
-          <div className="flex items-center gap-3">
-            <img src="/pluto.png" alt="logo" className="w-8 h-8 rounded-full" />
-            <h2 className="text-xl font-bold">PlutoSpeaks</h2>
+    <main className="min-h-screen bg-gradient-to-br from-[#070816] via-[#29115f] to-[#001f7a] text-white overflow-hidden">
+      <div className="flex min-h-screen">
+        <aside className="w-[310px] bg-black/45 border-r border-white/10 p-7 flex flex-col">
+          <div className="rounded-2xl overflow-hidden shadow-[0_0_30px_rgba(0,255,255,0.25)] mb-7">
+            <img
+  src="/pluto.png"
+  alt="PlutoSpeaks"
+  className="w-full h-[210px] object-contain p-2"
+/>
           </div>
 
-          <div className="flex gap-3">
-            <button
-              onClick={() => {
-                setMode("ai");
-                setMessages([]);
-              }}
-              className={`px-5 py-2 rounded-xl font-semibold transition ${
-                mode === "ai"
-                  ? "bg-cyan-500 text-white"
-                  : "bg-white/10 text-gray-300"
-              }`}
-            >
-              🤖 AI Chat
-            </button>
+          <h1 className="text-4xl font-extrabold text-yellow-300 mb-3">PlutoSpeaks</h1>
+          <p className="text-center text-white/80 mb-8">
+            Exploring the Universe of <br /> Knowledge
+          </p>
 
-            <button
-              onClick={() => {
-                setMode("friend");
-                setMessages([]);
-              }}
-              className={`px-5 py-2 rounded-xl font-semibold transition ${
-                mode === "friend"
-                  ? "bg-purple-600 text-white"
-                  : "bg-white/10 text-gray-300"
-              }`}
-            >
-              👥 Friend Chat
-            </button>
-          </div>
-        </div>
+          {!user ? (
+            <>
+              <input
+                className="mb-4 px-4 py-3 rounded-lg bg-black/40 border border-white/10 outline-none"
+                placeholder="Email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+              />
 
-        <div className="text-center mb-6 text-lg font-semibold">
-          {mode === "ai"
-            ? "Welcome to PlutoSpeaks! 👋"
-            : friendEmail
-            ? `Private chat with ${friendEmail}`
-            : "Friend Chat: login and enter friend email"}
-        </div>
+              <input
+                className="mb-4 px-4 py-3 rounded-lg bg-black/40 border border-white/10 outline-none"
+                placeholder="Password"
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+              />
 
-        <div className="flex-1 overflow-y-auto space-y-4 pb-4">
-          {messages.map((msg, i) => {
-            const isMine =
-              mode === "friend"
-                ? msg.sender_email === user?.email
-                : msg.role === "user";
+              <button onClick={login} className="mb-4 py-4 rounded-lg bg-cyan-400 text-white font-bold">
+                Login
+              </button>
 
-            return (
-              <div
-                key={msg.id || i}
-                className={`max-w-2xl p-4 rounded-xl shadow-lg ${
-                  isMine
-                    ? "ml-auto bg-cyan-500 text-white"
-                    : "mr-auto bg-black/50 text-white border border-white/10"
-                }`}
-              >
-                {mode === "friend" && (
-                  <p className="text-xs text-white/70 mb-1">
-                    {msg.sender_email}
-                  </p>
-                )}
+              <button onClick={signUp} className="mb-4 py-4 rounded-lg bg-purple-600 text-white font-bold">
+                Sign Up
+              </button>
 
-                <p>{msg.content}</p>
+              <button onClick={forgotPassword} className="text-cyan-300 text-sm font-bold">
+                Forgot password?
+              </button>
+            </>
+          ) : (
+            <>
+              <p className="text-cyan-300 text-sm mb-4 break-words">
+                Logged in: {user.email}
+              </p>
 
-                <div className="flex justify-end items-center gap-2 mt-2">
-                  {msg.pending && (
-                    <span className="text-[10px] text-white/60">sending...</span>
-                  )}
+              <button onClick={logout} className="mb-5 py-4 rounded-lg bg-red-600 font-bold">
+                Logout
+              </button>
 
-                  <p className="text-[11px] text-white/70">
-                    {msg.created_at ? formatTime(msg.created_at) : ""}
-                  </p>
-                </div>
-              </div>
-            );
-          })}
+              <input
+                className="mb-4 px-4 py-3 rounded-lg bg-black/40 border border-white/10 outline-none"
+                placeholder="Friend email"
+                value={friendEmail}
+                onChange={(e) => setFriendEmail(e.target.value)}
+              />
 
-          {loading && (
-            <div className="mr-auto max-w-xl bg-black/50 p-4 rounded-xl border border-white/10">
-              ✨ Pluto is thinking...
-            </div>
+              <button onClick={openFriendChat} className="py-4 rounded-lg bg-purple-600 font-bold">
+                Open Friend Chat
+              </button>
+            </>
           )}
 
-          <div ref={bottomRef} />
-        </div>
+          <div className="mt-auto flex items-center gap-2 pt-6">
+  <div className="w-10 h-10 rounded-full bg-black/60 flex items-center justify-center text-white font-bold">
+    {user?.email?.[0]?.toUpperCase() || "U"}
+  </div>
+  <span className="text-sm text-white/60 truncate">
+    {user?.email}
+  </span>
+</div>
+        </aside>
 
-        <div className="flex gap-3 border-t border-white/10 pt-4">
-          <input
-            className="flex-1 p-4 rounded-xl bg-black/50 border border-white/20 outline-none text-white placeholder:text-gray-400"
-            placeholder={
-              mode === "ai"
-                ? "Ask PlutoSpeaks anything..."
-                : friendEmail
-                ? "Message your friend..."
-                : "Enter friend email first..."
-            }
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") sendMessage();
-            }}
-          />
+        <section className="flex-1 flex flex-col p-8 relative">
+          <header className="flex items-center justify-between mb-8">
+            <h2 className="text-3xl font-bold">🪐 PlutoSpeaks</h2>
 
-          <button
-            onClick={sendMessage}
-            disabled={loading}
-            className="bg-cyan-500 hover:bg-cyan-400 disabled:opacity-50 px-5 rounded-xl text-2xl transition"
-          >
-            🚀
-          </button>
-        </div>
-      </section>
+            <div className="flex gap-4">
+              <button
+                onClick={() => setMode("ai")}
+                className={`px-8 py-4 rounded-2xl font-bold ${
+                  mode === "ai" ? "bg-cyan-400" : "bg-purple-700/60"
+                }`}
+              >
+                🤖 AI Chat
+              </button>
 
-      <div className="fixed bottom-4 left-4 z-50 text-sm font-bold kunal-watermark">
-        <span className="bg-gradient-to-r from-cyan-400 via-white to-purple-400 bg-clip-text text-transparent">
-          kunal
-        </span>
+              <button
+                onClick={() => setMode("friend")}
+                className={`px-8 py-4 rounded-2xl font-bold ${
+                  mode === "friend" ? "bg-purple-600" : "bg-purple-700/60"
+                }`}
+              >
+                👥 Friend Chat
+              </button>
+            </div>
+          </header>
+
+          <h3 className="text-center text-2xl font-bold mb-6">
+            {mode === "ai"
+              ? "Welcome to PlutoSpeaks! 👋"
+              : activeFriend
+              ? `Private chat with ${activeFriend}`
+              : "Friend Chat: login and enter friend email"}
+          </h3>
+
+          <div className="flex-1 overflow-y-auto px-6 pb-6 space-y-5">
+            {activeMessages.map((msg, index) => {
+              const isMine =
+                mode === "friend"
+                  ? msg.sender_email === user?.email?.toLowerCase()
+                  : msg.sender_email === "you";
+
+              return (
+                <div
+                  key={msg.id || index}
+                  className={`max-w-[78%] rounded-2xl px-6 py-4 shadow-lg ${
+                    isMine
+                      ? "ml-auto bg-cyan-300 text-white"
+                      : "mr-auto bg-black/55 text-white"
+                  }`}
+                >
+                  <div className="text-xs opacity-80 mb-1">
+                    {msg.sender_email} {timeText(msg.created_at) && `• ${timeText(msg.created_at)}`}
+                  </div>
+                  <div className="font-semibold whitespace-pre-wrap">{msg.content}</div>
+                </div>
+              );
+            })}
+
+            {loading && (
+              <div className="max-w-[70%] bg-black/55 rounded-2xl px-6 py-4">
+                ⚠️ Pluto is thinking too hard right now...
+              </div>
+            )}
+
+            <div ref={bottomRef} />
+          </div>
+
+          <div className="border-t border-white/10 pt-5 flex gap-4">
+            <input
+              className="flex-1 px-5 py-4 rounded-xl bg-black/60 outline-none"
+              placeholder={
+                mode === "ai"
+                  ? "Ask PlutoSpeaks anything..."
+                  : activeFriend
+                  ? "Message your friend..."
+                  : "Enter friend email first..."
+              }
+              value={mode === "ai" ? aiInput : friendInput}
+              disabled={mode === "friend" && !activeFriend}
+              onChange={(e) =>
+                mode === "ai" ? setAiInput(e.target.value) : setFriendInput(e.target.value)
+              }
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  mode === "ai" ? sendAIMessage() : sendFriendMessage();
+                }
+              }}
+            />
+
+            <button
+              onClick={mode === "ai" ? sendAIMessage : sendFriendMessage}
+              className="w-20 rounded-xl bg-cyan-300 text-3xl"
+            >
+              🚀
+            </button>
+            <div className="pointer-events-none absolute top-4 left-6 text-sm font-semibold tracking-widest text-white/40 glow-kunal">
+  Kunal ✨
+</div>
+          </div>
+        </section>
       </div>
     </main>
   );
