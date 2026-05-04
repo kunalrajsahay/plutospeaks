@@ -347,7 +347,7 @@ export default function Home() {
 </div>
         </aside>
 
-        <section className="flex-1 flex flex-col p-8 relative">
+        <section className="flex-1 h-screen flex flex-col p-8 relative overflow-hidden">
           <header className="flex items-center justify-between mb-8">
             <h2 className="text-3xl font-bold">🪐 PlutoSpeaks</h2>
 
@@ -380,7 +380,7 @@ export default function Home() {
               : "Friend Chat: login and enter friend email"}
           </h3>
 
-          <div className="flex-1 overflow-y-auto px-6 pb-6 space-y-5">
+          <div className="h-[520px] overflow-y-auto px-6 pb-6 space-y-5 rounded-2xl">
             {activeMessages.map((msg, index) => {
               const isMine =
                 mode === "friend"
