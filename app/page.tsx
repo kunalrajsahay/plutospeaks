@@ -11,6 +11,7 @@ type Msg = {
   receiver_email?: string | null;
   content: string;
   created_at?: string;
+  is_read?: boolean | null;
 };
 
 export default function Home() {
@@ -26,6 +27,7 @@ export default function Home() {
   const [friendInput, setFriendInput] = useState("");
   const [aiMessages, setAiMessages] = useState<Msg[]>([]);
   const [friendMessages, setFriendMessages] = useState<Msg[]>([]);
+  const [inbox, setInbox] = useState<Msg[]>([]);
 
   const [loading, setLoading] = useState(false);
   const bottomRef = useRef<HTMLDivElement | null>(null);
@@ -54,6 +56,11 @@ export default function Home() {
 
     return () => listener.subscription.unsubscribe();
   }, []);
+
+  useEffect(() => {
+    if (!user?.email) return;
+    loadInbox();
+  }, [user]);
 
   const login = async () => {
     if (!email || !password) return alert("Enter email and password");
@@ -93,6 +100,7 @@ export default function Home() {
     await supabase.auth.signOut();
     setUser(null);
     setFriendMessages([]);
+    setInbox([]);
     setActiveFriend("");
   };
 
@@ -108,7 +116,77 @@ export default function Home() {
     setActiveFriend(cleanEmail);
     setMode("friend");
 
+    await markMessagesAsRead(cleanEmail);
     await loadFriendMessages(cleanEmail);
+    await loadInbox();
+  };
+
+  const openInboxChat = async (friend: string) => {
+    const cleanEmail = friend.trim().toLowerCase();
+
+    localStorage.setItem("plutospeaks_friend_email", cleanEmail);
+    setFriendEmail(cleanEmail);
+    setActiveFriend(cleanEmail);
+    setMode("friend");
+
+    await markMessagesAsRead(cleanEmail);
+    await loadFriendMessages(cleanEmail);
+    await loadInbox();
+  };
+
+  const loadInbox = async () => {
+    if (!user?.email) return;
+
+    const myEmail = user.email.toLowerCase();
+
+    const { data, error } = await supabase
+      .from("messages")
+      .select("*")
+      .or(`sender_email.eq.${myEmail},receiver_email.eq.${myEmail}`)
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      console.error("Inbox error:", error);
+      return;
+    }
+
+    const grouped: Record<string, Msg & { unread_count?: number }> = {};
+
+    data?.forEach((msg: Msg) => {
+      const senderEmail = msg.sender_email?.toLowerCase() || "";
+      const receiverEmail = msg.receiver_email?.toLowerCase() || "";
+      const otherUser = senderEmail === myEmail ? receiverEmail : senderEmail;
+
+      if (!otherUser) return;
+
+      if (!grouped[otherUser]) {
+        grouped[otherUser] = { ...msg, unread_count: 0 };
+      }
+
+      if (receiverEmail === myEmail && senderEmail === otherUser && msg.is_read === false) {
+        grouped[otherUser].unread_count = (grouped[otherUser].unread_count || 0) + 1;
+      }
+    });
+
+    setInbox(Object.values(grouped));
+  };
+
+  const markMessagesAsRead = async (friend: string) => {
+    if (!user?.email || !friend) return;
+
+    const myEmail = user.email.toLowerCase();
+    const otherEmail = friend.toLowerCase();
+
+    const { error } = await supabase
+      .from("messages")
+      .update({ is_read: true })
+      .eq("sender_email", otherEmail)
+      .eq("receiver_email", myEmail)
+      .eq("is_read", false);
+
+    if (error) {
+      console.error("Mark read error:", error);
+    }
   };
 
   const loadFriendMessages = async (friend = activeFriend) => {
@@ -135,12 +213,10 @@ export default function Home() {
   };
 
   useEffect(() => {
-    if (!user || !activeFriend) return;
-
-    loadFriendMessages(activeFriend);
+    if (!user?.email) return;
 
     const channel = supabase
-      .channel("plutospeaks-realtime-chat")
+      .channel("plutospeaks-realtime-inbox")
       .on(
         "postgres_changes",
         {
@@ -148,32 +224,57 @@ export default function Home() {
           schema: "public",
           table: "messages",
         },
-        (payload) => {
+        async (payload) => {
           const msg = payload.new as Msg;
           const myEmail = user.email?.toLowerCase();
-          const otherEmail = activeFriend.toLowerCase();
+          const currentFriend = activeFriend.toLowerCase();
 
-          const belongsToChat =
-            (msg.sender_email === myEmail && msg.receiver_email === otherEmail) ||
-            (msg.sender_email === otherEmail && msg.receiver_email === myEmail);
+          const isForMe =
+            msg.sender_email === myEmail || msg.receiver_email === myEmail;
 
-          if (belongsToChat) {
+          if (isForMe) {
+            await loadInbox();
+          }
+
+          const belongsToOpenChat =
+            currentFriend &&
+            ((msg.sender_email === myEmail && msg.receiver_email === currentFriend) ||
+              (msg.sender_email === currentFriend && msg.receiver_email === myEmail));
+
+          if (belongsToOpenChat) {
             setFriendMessages((prev) => {
               if (msg.id && prev.some((m) => m.id === msg.id)) return prev;
               return [...prev, msg];
             });
+
+            if (msg.receiver_email === myEmail) {
+              await markMessagesAsRead(currentFriend);
+              await loadInbox();
+            }
+
             scrollBottom();
           }
         }
       )
       .subscribe();
 
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [user, activeFriend]);
+
+  useEffect(() => {
+    if (!user || !activeFriend) return;
+
+    loadFriendMessages(activeFriend);
+    loadInbox();
+
     const fallback = setInterval(() => {
       loadFriendMessages(activeFriend);
+      loadInbox();
     }, 5000);
 
     return () => {
-      supabase.removeChannel(channel);
       clearInterval(fallback);
     };
   }, [user, activeFriend]);
@@ -192,6 +293,7 @@ export default function Home() {
       receiver_email: activeFriend.toLowerCase(),
       content,
       created_at: new Date().toISOString(),
+      is_read: false,
     };
 
     setFriendMessages((prev) => [...prev, tempMsg]);
@@ -202,6 +304,7 @@ export default function Home() {
       sender_email: user.email.toLowerCase(),
       receiver_email: activeFriend.toLowerCase(),
       content,
+      is_read: false,
     });
 
     if (error) {
@@ -209,6 +312,8 @@ export default function Home() {
       alert(error.message);
       await loadFriendMessages(activeFriend);
     }
+
+    await loadInbox();
   };
 
   const sendAIMessage = async () => {
@@ -266,22 +371,30 @@ export default function Home() {
     });
   };
 
+  const getOtherUser = (chat: Msg) => {
+    const myEmail = user?.email?.toLowerCase();
+    const senderEmail = chat.sender_email?.toLowerCase() || "";
+    const receiverEmail = chat.receiver_email?.toLowerCase() || "";
+
+    return senderEmail === myEmail ? receiverEmail : senderEmail;
+  };
+
   const activeMessages = mode === "ai" ? aiMessages : friendMessages;
 
   return (
     <main className="min-h-screen bg-gradient-to-br from-[#070816] via-[#29115f] to-[#001f7a] text-white overflow-hidden">
-      <div className="flex min-h-screen">
-        <aside className="w-[310px] bg-black/45 border-r border-white/10 p-7 flex flex-col">
+      <div className="flex flex-col md:flex-row min-h-screen">
+        <aside className="w-full md:w-[310px] bg-black/45 border-r border-white/10 p-4 md:p-7 flex flex-col max-h-[45vh] md:max-h-none overflow-y-auto">
           <div className="rounded-2xl overflow-hidden shadow-[0_0_30px_rgba(0,255,255,0.25)] mb-7">
             <img
-  src="/pluto.png"
-  alt="PlutoSpeaks"
-  className="w-full h-[210px] object-contain p-2"
-/>
+              src="/pluto.png"
+              alt="PlutoSpeaks"
+              className="w-full h-[120px] md:h-[210px] object-contain p-2"
+            />
           </div>
 
-          <h1 className="text-4xl font-extrabold text-yellow-300 mb-3">PlutoSpeaks</h1>
-          <p className="text-center text-white/80 mb-8">
+          <h1 className="text-3xl md:text-4xl font-extrabold text-yellow-300 mb-2 md:mb-3">PlutoSpeaks</h1>
+          <p className="text-center text-white/80 mb-4 md:mb-8">
             Exploring the Universe of <br /> Knowledge
           </p>
 
@@ -334,27 +447,84 @@ export default function Home() {
               <button onClick={openFriendChat} className="py-4 rounded-lg bg-purple-600 font-bold">
                 Open Friend Chat
               </button>
+
+              <div className="mt-6 border-t border-white/10 pt-5">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="font-bold text-yellow-300">Inbox</h3>
+                  <button
+                    onClick={loadInbox}
+                    className="text-xs px-3 py-1 rounded-full bg-white/10 hover:bg-white/20"
+                  >
+                    Refresh
+                  </button>
+                </div>
+
+                <div className="space-y-3 overflow-y-auto max-h-[265px] pr-1">
+                  {inbox.length === 0 ? (
+                    <div className="text-sm text-white/50 bg-white/5 rounded-xl p-4">
+                      No chats yet. Enter a friend email and send your first message.
+                    </div>
+                  ) : (
+                    inbox.map((chat, index) => {
+                      const otherUser = getOtherUser(chat);
+                      const unreadCount = (chat as any).unread_count || 0;
+                      const isActive = otherUser === activeFriend.toLowerCase();
+
+                      return (
+                        <div
+                          key={chat.id || index}
+                          onClick={() => openInboxChat(otherUser)}
+                          className={`cursor-pointer transition p-4 rounded-xl border ${
+                            isActive
+                              ? "bg-purple-600/40 border-cyan-300/40"
+                              : "bg-white/5 border-white/10 hover:bg-white/10"
+                          }`}
+                        >
+                          <div className="flex justify-between items-center gap-2">
+                            <div className="font-bold truncate text-sm">{otherUser}</div>
+                            <div className="text-[11px] text-white/50 whitespace-nowrap">
+                              {timeText(chat.created_at)}
+                            </div>
+                          </div>
+
+                          <div className="flex items-center justify-between gap-2 mt-1">
+                            <div className="text-sm text-white/60 truncate">
+                              {chat.content}
+                            </div>
+
+                            {unreadCount > 0 && (
+                              <span className="min-w-5 h-5 px-1 rounded-full bg-cyan-300 text-black text-xs font-bold flex items-center justify-center">
+                                {unreadCount}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
             </>
           )}
 
           <div className="mt-auto flex items-center gap-2 pt-6">
-  <div className="w-10 h-10 rounded-full bg-black/60 flex items-center justify-center text-white font-bold">
-    {user?.email?.[0]?.toUpperCase() || "U"}
-  </div>
-  <span className="text-sm text-white/60 truncate">
-    {user?.email}
-  </span>
-</div>
+            <div className="w-10 h-10 rounded-full bg-black/60 flex items-center justify-center text-white font-bold">
+              {user?.email?.[0]?.toUpperCase() || "U"}
+            </div>
+            <span className="text-sm text-white/60 truncate">
+              {user?.email}
+            </span>
+          </div>
         </aside>
 
-        <section className="flex-1 h-screen flex flex-col p-8 relative overflow-hidden">
-          <header className="flex items-center justify-between mb-8">
-            <h2 className="text-3xl font-bold">🪐 PlutoSpeaks</h2>
+        <section className="flex-1 min-h-[55vh] md:h-screen flex flex-col p-4 md:p-8 relative overflow-hidden">
+          <header className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-4 md:mb-8">
+            <h2 className="text-2xl md:text-3xl font-bold">🪐 PlutoSpeaks</h2>
 
-            <div className="flex gap-4">
+            <div className="flex gap-2 md:gap-4 w-full md:w-auto">
               <button
                 onClick={() => setMode("ai")}
-                className={`px-8 py-4 rounded-2xl font-bold ${
+                className={`flex-1 md:flex-none px-4 md:px-8 py-3 md:py-4 rounded-2xl font-bold ${
                   mode === "ai" ? "bg-cyan-400" : "bg-purple-700/60"
                 }`}
               >
@@ -363,7 +533,7 @@ export default function Home() {
 
               <button
                 onClick={() => setMode("friend")}
-                className={`px-8 py-4 rounded-2xl font-bold ${
+                className={`flex-1 md:flex-none px-4 md:px-8 py-3 md:py-4 rounded-2xl font-bold ${
                   mode === "friend" ? "bg-purple-600" : "bg-purple-700/60"
                 }`}
               >
@@ -372,7 +542,7 @@ export default function Home() {
             </div>
           </header>
 
-          <h3 className="text-center text-2xl font-bold mb-6">
+          <h3 className="text-center text-xl md:text-2xl font-bold mb-4 md:mb-6">
             {mode === "ai"
               ? "Welcome to PlutoSpeaks! 👋"
               : activeFriend
@@ -380,7 +550,7 @@ export default function Home() {
               : "Friend Chat: login and enter friend email"}
           </h3>
 
-          <div className="h-[520px] overflow-y-auto px-6 pb-6 space-y-5 rounded-2xl">
+          <div className="flex-1 min-h-[300px] overflow-y-auto px-2 md:px-6 pb-6 space-y-4 rounded-2xl">
             {activeMessages.map((msg, index) => {
               const isMine =
                 mode === "friend"
@@ -390,7 +560,7 @@ export default function Home() {
               return (
                 <div
                   key={msg.id || index}
-                  className={`max-w-[78%] rounded-2xl px-6 py-4 shadow-lg ${
+                  className={`max-w-[90%] md:max-w-[78%] rounded-2xl px-4 md:px-6 py-3 md:py-4 shadow-lg ${
                     isMine
                       ? "ml-auto bg-cyan-300 text-white"
                       : "mr-auto bg-black/55 text-white"
@@ -413,7 +583,7 @@ export default function Home() {
             <div ref={bottomRef} />
           </div>
 
-          <div className="border-t border-white/10 pt-5 flex gap-4">
+          <div className="border-t border-white/10 pt-4 flex gap-2 md:gap-4">
             <input
               className="flex-1 px-5 py-4 rounded-xl bg-black/60 outline-none"
               placeholder={
@@ -437,13 +607,13 @@ export default function Home() {
 
             <button
               onClick={mode === "ai" ? sendAIMessage : sendFriendMessage}
-              className="w-20 rounded-xl bg-cyan-300 text-3xl"
+              className="w-14 md:w-20 rounded-xl bg-cyan-300 text-2xl md:text-3xl"
             >
               🚀
             </button>
             <div className="pointer-events-none absolute top-4 left-6 text-sm font-semibold tracking-widest text-white/40 glow-kunal">
-  Kunal ✨
-</div>
+              Kunal ✨
+            </div>
           </div>
         </section>
       </div>
